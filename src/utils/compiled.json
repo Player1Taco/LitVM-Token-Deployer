@@ -1,0 +1,9 @@
+{
+  "abi": [],
+  "bytecode": "0x",
+  "contractName": "LitToken",
+  "compiler": "placeholder",
+  "optimized": false,
+  "runs": 0,
+  "compiledAt": "placeholder - run npm run compile to generate"
+}

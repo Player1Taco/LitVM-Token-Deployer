@@ -1,0 +1,151 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Custom CSS classes used throughout the app.
+ * Fix #5: These classes were referenced in components but not defined.
+ */
+
+@layer components {
+  /* Glass morphism effect — standard */
+  .glass {
+    @apply bg-white/[0.03] backdrop-blur-md border border-white/[0.06];
+  }
+
+  /* Glass morphism effect — stronger */
+  .glass-strong {
+    @apply bg-white/[0.06] backdrop-blur-xl border border-white/[0.08];
+  }
+
+  /* Main deployer card styling */
+  .deployer-card {
+    @apply relative overflow-hidden;
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.05),
+      0 20px 50px -10px rgba(0, 0, 0, 0.5),
+      0 0 80px -20px rgba(158, 127, 255, 0.08);
+  }
+
+  /* Gradient text effect */
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary via-purple-400 to-accent;
+  }
+
+  /* Glow effects */
+  .glow-success {
+    box-shadow:
+      0 0 20px rgba(16, 185, 129, 0.15),
+      0 0 40px rgba(16, 185, 129, 0.05);
+  }
+
+  .glow-primary {
+    box-shadow:
+      0 0 20px rgba(158, 127, 255, 0.2),
+      0 0 40px rgba(158, 127, 255, 0.08);
+  }
+
+  .glow-error {
+    box-shadow:
+      0 0 20px rgba(239, 68, 68, 0.15),
+      0 0 40px rgba(239, 68, 68, 0.05);
+  }
+
+  /* Custom scrollbar for event feed */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.1);
+    border-radius: 9999px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+  }
+}
+
+/* ---- Base Styles ---- */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: #171717;
+  color: #ffffff;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ---- Floating Taco Animations ---- */
+
+@keyframes taco-bounce-1 {
+  0%, 100% { transform: translateY(0) rotate(0deg); opacity: 0.15; }
+  25% { transform: translateY(-30px) rotate(10deg); opacity: 0.25; }
+  50% { transform: translateY(-15px) rotate(-5deg); opacity: 0.2; }
+  75% { transform: translateY(-25px) rotate(8deg); opacity: 0.18; }
+}
+
+@keyframes taco-bounce-2 {
+  0%, 100% { transform: translateY(0) rotate(0deg); opacity: 0.12; }
+  30% { transform: translateY(-40px) rotate(-12deg); opacity: 0.22; }
+  60% { transform: translateY(-20px) rotate(6deg); opacity: 0.17; }
+}
+
+@keyframes taco-bounce-3 {
+  0%, 100% { transform: translateY(0) rotate(5deg); opacity: 0.1; }
+  40% { transform: translateY(-35px) rotate(-8deg); opacity: 0.2; }
+  70% { transform: translateY(-10px) rotate(3deg); opacity: 0.15; }
+}
+
+@keyframes taco-bounce-4 {
+  0%, 100% { transform: translateY(0) rotate(-3deg); opacity: 0.14; }
+  35% { transform: translateY(-45px) rotate(15deg); opacity: 0.24; }
+  65% { transform: translateY(-22px) rotate(-7deg); opacity: 0.18; }
+}
+
+@keyframes taco-bounce-5 {
+  0%, 100% { transform: translateY(0) rotate(2deg); opacity: 0.11; }
+  45% { transform: translateY(-28px) rotate(-10deg); opacity: 0.21; }
+  80% { transform: translateY(-8px) rotate(4deg); opacity: 0.16; }
+}
+
+@keyframes taco-spin-float {
+  0% { transform: translateY(0) rotate(0deg); opacity: 0.13; }
+  50% { transform: translateY(-32px) rotate(180deg); opacity: 0.23; }
+  100% { transform: translateY(0) rotate(360deg); opacity: 0.13; }
+}
+
+/* ---- Selection ---- */
+
+::selection {
+  background-color: rgba(158, 127, 255, 0.3);
+  color: #ffffff;
+}
+
+/* ---- Focus Visible ---- */
+
+:focus-visible {
+  outline: 2px solid rgba(158, 127, 255, 0.5);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

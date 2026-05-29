@@ -5,10 +5,7 @@
  * Uses the compiled JSON ABI as the source of truth to prevent ABI drift (fix #2).
  * Validates supply constants at startup with graceful error handling (fix #12).
  *
- * Fix #1: Graceful handling when compiled.json is a placeholder.
- * Fix #2: Uses compiled ABI directly — no hand-written ABI that can drift.
- * Fix #12: validateSupplyConstants logs errors instead of crashing the app.
- * Fix #22: formatWeiToDisplay uses BigInt-based formatting for large values.
+ * Fix #31: Added DEPLOY_FEE_WEI (0.1 LIT) deployment fee constant.
  */
 
 import { getAddress, parseUnits, formatUnits, InterfaceAbi } from 'ethers';
@@ -16,29 +13,14 @@ import compiledContract from './compiled.json';
 
 // ---------- ABI & Bytecode from compiled LitToken.sol ----------
 
-/**
- * Whether the compiled contract has valid bytecode.
- * False when compiled.json is a placeholder (before running `npm run compile`).
- */
 export const IS_COMPILED: boolean =
   compiledContract.bytecode !== '0x' &&
   compiledContract.bytecode.length > 10 &&
   compiledContract.compiler !== 'placeholder';
 
-/**
- * Token ABI from the solc compilation output.
- *
- * Fix #2: This is the compiled JSON ABI — the single source of truth.
- * No separate hand-written ABI that could drift out of sync.
- *
- * When compiled.json is a placeholder, falls back to a minimal human-readable
- * ABI so TypeScript compilation doesn't break (deployment will still be blocked
- * by the IS_COMPILED check).
- */
 export const TOKEN_ABI: InterfaceAbi = IS_COMPILED
   ? (compiledContract.abi as InterfaceAbi)
   : [
-      // Fallback human-readable ABI for dev mode before compilation
       'constructor(string _name, string _symbol)',
       'function name() view returns (string)',
       'function symbol() view returns (string)',
@@ -61,10 +43,6 @@ export const TOKEN_ABI: InterfaceAbi = IS_COMPILED
       'event OwnershipTransferred(address indexed previousOwner, address indexed newOwner)',
     ];
 
-/**
- * Contract bytecode from solc compilation.
- * Will be "0x" when compiled.json is a placeholder.
- */
 export const TOKEN_BYTECODE: string = compiledContract.bytecode;
 
 if (!IS_COMPILED) {
@@ -78,15 +56,6 @@ if (!IS_COMPILED) {
 
 const DEFAULT_FEE_WALLET = '0x896C20Da40c2A4df9B7C98B16a8D5A95129161a5';
 
-/**
- * Resolves and validates the fee wallet address from environment configuration.
- *
- * NOTE: This address MUST match the hardcoded FEE_WALLET constant in LitToken.sol.
- * The Solidity constant is compiled into bytecode and cannot be changed. This
- * environment variable exists only for frontend display and verification purposes.
- * Changing VITE_FEE_WALLET without recompiling the contract will cause a mismatch
- * between the on-chain fee destination and the frontend display.
- */
 function resolveFeeWallet(): string {
   const raw = import.meta.env.VITE_FEE_WALLET?.trim() || DEFAULT_FEE_WALLET;
 
@@ -128,15 +97,19 @@ export const TOTAL_SUPPLY_WEI: bigint = parseUnits('1000000000', TOKEN_DECIMALS)
 export const FEE_AMOUNT_WEI: bigint = parseUnits('10000', TOKEN_DECIMALS);
 export const DEPLOYER_RECEIVES_WEI: bigint = TOTAL_SUPPLY_WEI - FEE_AMOUNT_WEI;
 
-// ---------- Supply Math Validation (Graceful — fix #12) ----------
+// ---------- Deployment Fee (Fix #31) ----------
 
 /**
- * Validates supply constants at startup.
- *
- * Fix #12: Logs errors to console instead of throwing, so the app doesn't
- * become completely unloadable during development if constants are tweaked.
- * Sets a flag that can be checked before deployment.
+ * Native token fee charged for deploying a token.
+ * 0.1 LIT — sent to the fee wallet before contract deployment.
+ * Covers gas costs and protocol fee. Any excess goes to the fee wallet.
  */
+export const DEPLOY_FEE_WEI: bigint = parseUnits('0.1', 18);
+export const DEPLOY_FEE_DISPLAY = '0.1';
+export const DEPLOY_FEE_SYMBOL = 'LIT';
+
+// ---------- Supply Math Validation (Graceful — fix #12) ----------
+
 export let SUPPLY_CONSTANTS_VALID = true;
 
 (function validateSupplyConstants() {
@@ -168,6 +141,7 @@ export let SUPPLY_CONSTANTS_VALID = true;
       totalSupply: formatUnits(TOTAL_SUPPLY_WEI, TOKEN_DECIMALS) + ' tokens',
       feeAmount: formatUnits(FEE_AMOUNT_WEI, TOKEN_DECIMALS) + ' tokens',
       deployerReceives: formatUnits(DEPLOYER_RECEIVES_WEI, TOKEN_DECIMALS) + ' tokens',
+      deployFee: formatUnits(DEPLOY_FEE_WEI, 18) + ' LIT (native)',
     });
   }
 })();
@@ -180,33 +154,17 @@ export const DEPLOYER_RECEIVES = '999,990,000';
 
 // ---------- Helper: Format BigInt to Display ----------
 
-/**
- * Formats a BigInt wei value to a human-readable token amount string.
- *
- * Fix #22: Uses BigInt division for large values to avoid parseFloat precision loss.
- * For values > Number.MAX_SAFE_INTEGER, we use BigInt arithmetic directly.
- *
- * @param wei - The BigInt value in wei (18 decimals)
- * @returns Formatted string like "1,000,000,000" or "10,000"
- */
 export function formatWeiToDisplay(wei: bigint): string {
   const raw = formatUnits(wei, TOKEN_DECIMALS);
 
-  // Split on decimal point to handle integer and fractional parts separately
   const [integerPart, fractionalPart] = raw.split('.');
-
-  // For large integers, format with locale (BigInt-safe: we're only formatting the string)
   const intNum = BigInt(integerPart);
-
-  // Check if there's a meaningful fractional part
   const hasFraction = fractionalPart && parseInt(fractionalPart) > 0;
 
   if (!hasFraction) {
-    // Pure integer — format with commas using string manipulation (BigInt safe)
     return formatBigIntWithCommas(intNum);
   }
 
-  // Has fractional part — trim trailing zeros and limit to 4 decimals
   const trimmedFraction = fractionalPart.slice(0, 4).replace(/0+$/, '');
   if (trimmedFraction.length === 0) {
     return formatBigIntWithCommas(intNum);
@@ -215,16 +173,11 @@ export function formatWeiToDisplay(wei: bigint): string {
   return `${formatBigIntWithCommas(intNum)}.${trimmedFraction}`;
 }
 
-/**
- * Formats a BigInt with comma separators.
- * Avoids parseFloat precision loss for values > Number.MAX_SAFE_INTEGER.
- */
 function formatBigIntWithCommas(value: bigint): string {
   const str = value.toString();
   const isNegative = str.startsWith('-');
   const abs = isNegative ? str.slice(1) : str;
 
-  // Add commas every 3 digits from the right
   let result = '';
   for (let i = 0; i < abs.length; i++) {
     if (i > 0 && (abs.length - i) % 3 === 0) {
@@ -245,6 +198,7 @@ export interface DeployedToken {
   deployer: string;
   timestamp: number;
   txHash: string;
+  feeTxHash?: string;
 }
 
 export function getStoredDeployments(): DeployedToken[] {

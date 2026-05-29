@@ -3,10 +3,8 @@
  *
  * Main orchestrator for the token deployment flow.
  *
- * FIX (queue error): All callbacks passed to useTokenDeploy are now
- * memoized with useCallback so they have stable references across renders.
- * This prevents useCallback dependency churn inside useTokenDeploy which
- * was contributing to React fiber state corruption during HMR reloads.
+ * Fix #31: Added 0.1 LIT deployment fee display, updated progress steps,
+ *          and dynamic status messages.
  */
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
@@ -32,6 +30,7 @@ import {
   Radio,
   BadgeCheck,
   XCircle,
+  Banknote,
 } from 'lucide-react';
 import { Contract } from 'ethers';
 import { useWallet } from '../hooks/useWallet';
@@ -45,6 +44,8 @@ import {
   TOTAL_SUPPLY_WEI,
   FEE_AMOUNT_WEI,
   DEPLOYER_RECEIVES_WEI,
+  DEPLOY_FEE_DISPLAY,
+  DEPLOY_FEE_SYMBOL,
   formatWeiToDisplay,
   IS_COMPILED,
 } from '../utils/contract';
@@ -61,7 +62,6 @@ const TokenDeployer: React.FC = () => {
   const [tokenName, setTokenName] = useState('');
   const [tokenSymbol, setTokenSymbol] = useState('');
 
-  // Extracted hooks
   const {
     tokenEvents,
     isListening,
@@ -70,11 +70,6 @@ const TokenDeployer: React.FC = () => {
     clearEvents,
   } = useTokenEvents();
 
-  /**
-   * FIX: Memoize callbacks with useCallback so useTokenDeploy receives
-   * stable references. Previously these were inline anonymous functions
-   * that created new references every render, destabilizing the hook.
-   */
   const handleDeploySuccess = useCallback((contract: Contract) => {
     attachEventListeners(contract);
   }, [attachEventListeners]);
@@ -88,7 +83,9 @@ const TokenDeployer: React.FC = () => {
     deployStep,
     deployedAddress,
     txHash,
+    feeTxHash,
     errorMsg,
+    statusMsg,
     verification,
     handleDeploy,
     resetForm: resetDeployState,
@@ -101,14 +98,12 @@ const TokenDeployer: React.FC = () => {
     onReset: handleReset,
   });
 
-  // Cleanup listeners on unmount
   useEffect(() => {
     return () => {
       cleanupListeners();
     };
   }, [cleanupListeners]);
 
-  // Memoize derived values
   const trimmedName = useMemo(() => tokenName.trim(), [tokenName]);
   const trimmedSymbol = useMemo(() => tokenSymbol.trim().toUpperCase(), [tokenSymbol]);
 
@@ -140,9 +135,7 @@ const TokenDeployer: React.FC = () => {
     toast.success('Copied to clipboard!');
   }, []);
 
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
+  const isInProgress = deployStep === 'fee' || deployStep === 'confirming' || deployStep === 'deploying' || deployStep === 'verifying';
 
   return (
     <div className="w-full max-w-2xl mx-auto">
@@ -198,23 +191,24 @@ const TokenDeployer: React.FC = () => {
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.3, duration: 0.6 }}
-        className="grid grid-cols-3 gap-3 mb-8"
+        className="grid grid-cols-4 gap-3 mb-8"
       >
         {[
           { icon: Coins, label: 'Total Supply', value: '1B', color: 'text-primary' },
           { icon: Users, label: 'You Receive', value: '999.99M', color: 'text-secondary' },
           { icon: Shield, label: 'Fee Allocation', value: '10K', color: 'text-accent' },
+          { icon: Banknote, label: 'Deploy Fee', value: '0.1 LIT', color: 'text-warning' },
         ].map((stat, i) => (
           <motion.div
             key={stat.label}
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.4 + i * 0.1 }}
-            className="glass rounded-xl p-4 text-center hover:border-primary/20 transition-all duration-300"
+            className="glass rounded-xl p-3 sm:p-4 text-center hover:border-primary/20 transition-all duration-300"
           >
-            <stat.icon className={`w-5 h-5 ${stat.color} mx-auto mb-2`} />
-            <p className="text-lg font-bold text-white font-mono">{stat.value}</p>
-            <p className="text-[10px] text-gray-500 uppercase tracking-wider mt-1">{stat.label}</p>
+            <stat.icon className={`w-4 sm:w-5 h-4 sm:h-5 ${stat.color} mx-auto mb-2`} />
+            <p className="text-sm sm:text-lg font-bold text-white font-mono">{stat.value}</p>
+            <p className="text-[9px] sm:text-[10px] text-gray-500 uppercase tracking-wider mt-1">{stat.label}</p>
           </motion.div>
         ))}
       </motion.div>
@@ -266,6 +260,7 @@ const TokenDeployer: React.FC = () => {
               trimmedSymbol={trimmedSymbol}
               deployedAddress={deployedAddress}
               txHash={txHash}
+              feeTxHash={feeTxHash}
               verification={verification}
               tokenEvents={tokenEvents}
               isListening={isListening}
@@ -278,6 +273,7 @@ const TokenDeployer: React.FC = () => {
               key="error"
               errorMsg={errorMsg}
               txHash={txHash}
+              feeTxHash={feeTxHash}
               copyToClipboard={copyToClipboard}
               onRetry={() => {
                 setDeployStep('idle');
@@ -292,10 +288,13 @@ const TokenDeployer: React.FC = () => {
               trimmedSymbol={trimmedSymbol}
               deployStep={deployStep}
               txHash={txHash}
+              feeTxHash={feeTxHash}
+              statusMsg={statusMsg}
               canDeploy={canDeploy}
               address={address}
               isConnecting={isConnecting}
               isWrongNetwork={isWrongNetwork}
+              isInProgress={isInProgress}
               connect={connect}
               switchToLitVM={switchToLitVM}
               onNameChange={setTokenName}
@@ -348,6 +347,7 @@ interface SuccessViewProps {
   trimmedSymbol: string;
   deployedAddress: string;
   txHash: string;
+  feeTxHash: string;
   verification: ReturnType<typeof import('../hooks/useTokenDeploy').useTokenDeploy>['verification'];
   tokenEvents: TokenEvent[];
   isListening: boolean;
@@ -361,6 +361,7 @@ const SuccessView: React.FC<SuccessViewProps> = ({
   trimmedSymbol,
   deployedAddress,
   txHash,
+  feeTxHash,
   verification,
   tokenEvents,
   isListening,
@@ -409,28 +410,51 @@ const SuccessView: React.FC<SuccessViewProps> = ({
       </div>
     </div>
 
-    {/* TX Hash */}
-    {txHash && (
-      <div className="glass rounded-xl p-4 mb-6">
-        <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Transaction Hash</p>
-        <div className="flex items-center gap-2 justify-center">
-          <a
-            href={getExplorerTxUrl(txHash)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-xs font-mono text-gray-300 break-all hover:text-primary hover:underline transition-colors"
-          >
-            {txHash}
-          </a>
-          <button
-            onClick={() => copyToClipboard(txHash)}
-            className="p-1.5 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
-          >
-            <Copy className="w-4 h-4 text-gray-400" />
-          </button>
+    {/* TX Hashes */}
+    <div className="glass rounded-xl p-4 mb-6 space-y-3">
+      {feeTxHash && (
+        <div>
+          <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Fee Transaction</p>
+          <div className="flex items-center gap-2 justify-center">
+            <a
+              href={getExplorerTxUrl(feeTxHash)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] font-mono text-gray-300 break-all hover:text-primary hover:underline transition-colors"
+            >
+              {feeTxHash}
+            </a>
+            <button
+              onClick={() => copyToClipboard(feeTxHash)}
+              className="p-1 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
+            >
+              <Copy className="w-3.5 h-3.5 text-gray-400" />
+            </button>
+          </div>
         </div>
-      </div>
-    )}
+      )}
+      {txHash && (
+        <div>
+          <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Deploy Transaction</p>
+          <div className="flex items-center gap-2 justify-center">
+            <a
+              href={getExplorerTxUrl(txHash)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] font-mono text-gray-300 break-all hover:text-primary hover:underline transition-colors"
+            >
+              {txHash}
+            </a>
+            <button
+              onClick={() => copyToClipboard(txHash)}
+              className="p-1 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
+            >
+              <Copy className="w-3.5 h-3.5 text-gray-400" />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
 
     {/* Distribution Summary */}
     <div className="glass rounded-xl p-4 mb-4">
@@ -444,8 +468,12 @@ const SuccessView: React.FC<SuccessViewProps> = ({
           <span className="text-sm text-gray-400">Fee Wallet</span>
           <span className="text-sm font-mono text-accent">{FEE_AMOUNT} tokens</span>
         </div>
+        <div className="flex justify-between items-center">
+          <span className="text-sm text-gray-400">Deploy Fee Paid</span>
+          <span className="text-sm font-mono text-warning">{DEPLOY_FEE_DISPLAY} {DEPLOY_FEE_SYMBOL}</span>
+        </div>
         <div className="border-t border-border pt-2 mt-2 flex justify-between items-center">
-          <span className="text-sm font-medium text-white">Total</span>
+          <span className="text-sm font-medium text-white">Total Supply</span>
           <span className="text-sm font-mono font-bold text-primary">{TOTAL_SUPPLY} tokens</span>
         </div>
       </div>
@@ -558,7 +586,6 @@ const VerificationPanel: React.FC<VerificationPanelProps> = ({ verification, dep
       )}
     </AnimatePresence>
 
-    {/* Verification Loading State */}
     <AnimatePresence>
       {!verification.checked && (deployStep === 'success' || deployStep === 'verifying') && (
         <motion.div
@@ -736,11 +763,12 @@ const EventFeed: React.FC<EventFeedProps> = ({
 interface ErrorViewProps {
   errorMsg: string;
   txHash: string;
+  feeTxHash: string;
   copyToClipboard: (text: string) => void;
   onRetry: () => void;
 }
 
-const ErrorView: React.FC<ErrorViewProps> = ({ errorMsg, txHash, copyToClipboard, onRetry }) => (
+const ErrorView: React.FC<ErrorViewProps> = ({ errorMsg, txHash, feeTxHash, copyToClipboard, onRetry }) => (
   <motion.div
     initial={{ opacity: 0, scale: 0.9 }}
     animate={{ opacity: 1, scale: 1 }}
@@ -760,27 +788,51 @@ const ErrorView: React.FC<ErrorViewProps> = ({ errorMsg, txHash, copyToClipboard
         ))}
     </div>
 
-    {txHash && (
-      <div className="glass rounded-lg p-3 mb-4 max-w-sm mx-auto">
-        <div className="flex items-center justify-center gap-2">
-          <span className="text-[10px] text-gray-500 uppercase tracking-wider">TX:</span>
-          <a
-            href={getExplorerTxUrl(txHash)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[11px] font-mono text-primary hover:underline truncate"
-          >
-            {txHash.slice(0, 18)}...{txHash.slice(-8)}
-          </a>
-          <button
-            onClick={() => copyToClipboard(txHash)}
-            className="p-1 rounded hover:bg-white/10 transition-colors"
-          >
-            <Copy className="w-3 h-3 text-gray-500" />
-          </button>
+    {/* TX References */}
+    <div className="space-y-2 mb-4 max-w-sm mx-auto">
+      {feeTxHash && (
+        <div className="glass rounded-lg p-3">
+          <div className="flex items-center justify-center gap-2">
+            <span className="text-[10px] text-gray-500 uppercase tracking-wider">Fee TX:</span>
+            <a
+              href={getExplorerTxUrl(feeTxHash)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] font-mono text-warning hover:underline truncate"
+            >
+              {feeTxHash.slice(0, 14)}...{feeTxHash.slice(-6)}
+            </a>
+            <button
+              onClick={() => copyToClipboard(feeTxHash)}
+              className="p-1 rounded hover:bg-white/10 transition-colors"
+            >
+              <Copy className="w-3 h-3 text-gray-500" />
+            </button>
+          </div>
         </div>
-      </div>
-    )}
+      )}
+      {txHash && (
+        <div className="glass rounded-lg p-3">
+          <div className="flex items-center justify-center gap-2">
+            <span className="text-[10px] text-gray-500 uppercase tracking-wider">Deploy TX:</span>
+            <a
+              href={getExplorerTxUrl(txHash)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] font-mono text-primary hover:underline truncate"
+            >
+              {txHash.slice(0, 14)}...{txHash.slice(-6)}
+            </a>
+            <button
+              onClick={() => copyToClipboard(txHash)}
+              className="p-1 rounded hover:bg-white/10 transition-colors"
+            >
+              <Copy className="w-3 h-3 text-gray-500" />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
 
     <motion.button
       whileHover={{ scale: 1.02 }}
@@ -804,10 +856,13 @@ interface FormViewProps {
   trimmedSymbol: string;
   deployStep: DeployStep;
   txHash: string;
+  feeTxHash: string;
+  statusMsg: string;
   canDeploy: boolean;
   address: string | null;
   isConnecting: boolean;
   isWrongNetwork: boolean;
+  isInProgress: boolean;
   connect: () => void;
   switchToLitVM: () => void;
   onNameChange: (value: string) => void;
@@ -822,10 +877,13 @@ const FormView: React.FC<FormViewProps> = ({
   trimmedSymbol,
   deployStep,
   txHash,
+  feeTxHash,
+  statusMsg,
   canDeploy,
   address,
   isConnecting,
   isWrongNetwork,
+  isInProgress,
   connect,
   switchToLitVM,
   onNameChange,
@@ -858,9 +916,9 @@ const FormView: React.FC<FormViewProps> = ({
           value={tokenName}
           onChange={(e) => onNameChange(e.target.value)}
           placeholder="e.g. LitVM Token"
-          disabled={deployStep !== 'idle'}
+          disabled={isInProgress}
           maxLength={64}
-          className="w-full px-4 py-3.5 rounded-xl bg-background/80 border border-border text-white placeholder-gray-600 focus:border-primary/50 focus:ring-1 focus:ring-primary/20 transition-all duration-300 text-sm font-medium"
+          className="w-full px-4 py-3.5 rounded-xl bg-background/80 border border-border text-white placeholder-gray-600 focus:border-primary/50 focus:ring-1 focus:ring-primary/20 transition-all duration-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
         />
         {trimmedName && (
           <motion.div
@@ -886,9 +944,9 @@ const FormView: React.FC<FormViewProps> = ({
           value={tokenSymbol}
           onChange={(e) => onSymbolChange(e.target.value.toUpperCase().slice(0, 10))}
           placeholder="e.g. LIT"
-          disabled={deployStep !== 'idle'}
+          disabled={isInProgress}
           maxLength={10}
-          className="w-full px-4 py-3.5 rounded-xl bg-background/80 border border-border text-white placeholder-gray-600 focus:border-secondary/50 focus:ring-1 focus:ring-secondary/20 transition-all duration-300 text-sm font-mono font-medium uppercase"
+          className="w-full px-4 py-3.5 rounded-xl bg-background/80 border border-border text-white placeholder-gray-600 focus:border-secondary/50 focus:ring-1 focus:ring-secondary/20 transition-all duration-300 text-sm font-mono font-medium uppercase disabled:opacity-50 disabled:cursor-not-allowed"
         />
         {trimmedSymbol && (
           <motion.div
@@ -917,7 +975,7 @@ const FormView: React.FC<FormViewProps> = ({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-accent" />
-          <span className="text-sm text-gray-300">Fee Wallet</span>
+          <span className="text-sm text-gray-300">Fee Wallet (tokens)</span>
         </div>
         <span className="text-sm font-mono text-accent font-medium">{FEE_AMOUNT}</span>
       </div>
@@ -933,6 +991,23 @@ const FormView: React.FC<FormViewProps> = ({
             style={{ width: '4px', flexShrink: 0 }}
           />
         </div>
+      </div>
+
+      {/* Deploy Fee */}
+      <div className="pt-3 border-t border-border/50 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Banknote className="w-3.5 h-3.5 text-warning" />
+            <span className="text-sm font-medium text-warning">Deployment Fee</span>
+          </div>
+          <span className="text-sm font-mono font-bold text-warning">
+            {DEPLOY_FEE_DISPLAY} {DEPLOY_FEE_SYMBOL}
+          </span>
+        </div>
+        <p className="text-[10px] text-gray-600 leading-relaxed">
+          A one-time fee of {DEPLOY_FEE_DISPLAY} {DEPLOY_FEE_SYMBOL} (native token) is charged to deploy your token.
+          This covers protocol fees and gas costs.
+        </p>
       </div>
 
       <div className="pt-2 border-t border-border/50">
@@ -978,28 +1053,28 @@ const FormView: React.FC<FormViewProps> = ({
       </motion.button>
     ) : (
       <motion.button
-        whileHover={canDeploy ? { scale: 1.01 } : {}}
-        whileTap={canDeploy ? { scale: 0.99 } : {}}
+        whileHover={canDeploy && !isInProgress ? { scale: 1.01 } : {}}
+        whileTap={canDeploy && !isInProgress ? { scale: 0.99 } : {}}
         onClick={onDeploy}
-        disabled={!canDeploy || deployStep !== 'idle'}
+        disabled={!canDeploy || isInProgress}
         className={`w-full relative py-4 rounded-xl font-bold text-sm overflow-hidden group transition-all duration-300 ${
-          !canDeploy ? 'opacity-40 cursor-not-allowed' : ''
+          !canDeploy || isInProgress ? 'opacity-40 cursor-not-allowed' : ''
         }`}
       >
         <div className="absolute inset-0 bg-gradient-to-r from-primary via-purple-500 to-accent" />
-        {canDeploy && (
+        {canDeploy && !isInProgress && (
           <div className="absolute inset-0 bg-gradient-to-r from-primary via-purple-500 to-accent blur-xl opacity-50 group-hover:opacity-70 transition-opacity" />
         )}
         <span className="relative flex items-center justify-center gap-2 text-white">
-          {deployStep === 'confirming' || deployStep === 'deploying' ? (
+          {isInProgress ? (
             <>
               <Loader2 className="w-5 h-5 animate-spin" />
-              {deployStep === 'confirming' ? 'Confirm in Wallet...' : 'Deploying Contract...'}
+              <span>{statusMsg || 'Processing...'}</span>
             </>
           ) : (
             <>
               <Rocket className="w-5 h-5" />
-              Deploy Token
+              Deploy Token ({DEPLOY_FEE_DISPLAY} {DEPLOY_FEE_SYMBOL})
               <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
             </>
           )}
@@ -1007,9 +1082,9 @@ const FormView: React.FC<FormViewProps> = ({
       </motion.button>
     )}
 
-    {/* Loading States */}
+    {/* Progress Panel */}
     <AnimatePresence>
-      {(deployStep === 'confirming' || deployStep === 'deploying' || deployStep === 'verifying') && (
+      {isInProgress && (
         <motion.div
           initial={{ opacity: 0, height: 0 }}
           animate={{ opacity: 1, height: 'auto' }}
@@ -1023,33 +1098,50 @@ const FormView: React.FC<FormViewProps> = ({
               </div>
               <div>
                 <p className="text-sm font-medium text-white">
-                  {deployStep === 'confirming'
-                    ? 'Waiting for wallet confirmation...'
-                    : deployStep === 'deploying'
-                    ? 'Deploying to LitVM...'
-                    : 'Verifying supply on-chain...'}
+                  {statusMsg || 'Processing...'}
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  {deployStep === 'confirming'
-                    ? 'Please confirm the transaction in your wallet'
+                  {deployStep === 'fee'
+                    ? 'Sending 0.1 LIT deployment fee to protocol wallet'
+                    : deployStep === 'confirming'
+                    ? 'Fee confirmed! Now deploying your token contract'
                     : deployStep === 'deploying'
-                    ? 'This may take a moment depending on network congestion'
-                    : 'Checking supply distribution matches expected values'}
+                    ? 'Waiting for on-chain confirmation...'
+                    : 'Verifying token supply matches expected values'}
                 </p>
               </div>
             </div>
 
-            {deployStep === 'deploying' && txHash && (
+            {/* TX References */}
+            {feeTxHash && (
               <div className="mt-3 pt-3 border-t border-border/50">
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-gray-500 uppercase tracking-wider">TX:</span>
+                  <CheckCircle2 className="w-3 h-3 text-success flex-shrink-0" />
+                  <span className="text-[10px] text-gray-500 uppercase tracking-wider">Fee:</span>
+                  <a
+                    href={getExplorerTxUrl(feeTxHash)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[11px] font-mono text-success hover:underline truncate"
+                  >
+                    {feeTxHash.slice(0, 14)}...{feeTxHash.slice(-6)}
+                  </a>
+                </div>
+              </div>
+            )}
+
+            {txHash && (
+              <div className={`${feeTxHash ? 'mt-1' : 'mt-3 pt-3 border-t border-border/50'}`}>
+                <div className="flex items-center gap-2">
+                  <Loader2 className="w-3 h-3 text-primary animate-spin flex-shrink-0" />
+                  <span className="text-[10px] text-gray-500 uppercase tracking-wider">Deploy:</span>
                   <a
                     href={getExplorerTxUrl(txHash)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-[11px] font-mono text-primary hover:underline truncate"
                   >
-                    {txHash.slice(0, 18)}...{txHash.slice(-8)}
+                    {txHash.slice(0, 14)}...{txHash.slice(-6)}
                   </a>
                 </div>
               </div>
@@ -1057,13 +1149,29 @@ const FormView: React.FC<FormViewProps> = ({
 
             {/* 4-step progress bar */}
             <div className="flex items-center gap-2 mt-4">
+              {/* Step 1: Fee */}
               <div
-                className={`flex-1 h-1 rounded-full ${
-                  deployStep === 'confirming' ? 'bg-primary animate-pulse' : 'bg-success'
+                className={`flex-1 h-1.5 rounded-full transition-colors duration-500 ${
+                  deployStep === 'fee'
+                    ? 'bg-warning animate-pulse'
+                    : deployStep !== 'idle'
+                    ? 'bg-success'
+                    : 'bg-border'
                 }`}
               />
+              {/* Step 2: Deploy */}
               <div
-                className={`flex-1 h-1 rounded-full ${
+                className={`flex-1 h-1.5 rounded-full transition-colors duration-500 ${
+                  deployStep === 'confirming'
+                    ? 'bg-primary animate-pulse'
+                    : deployStep === 'deploying' || deployStep === 'verifying'
+                    ? 'bg-success'
+                    : 'bg-border'
+                }`}
+              />
+              {/* Step 3: Confirm */}
+              <div
+                className={`flex-1 h-1.5 rounded-full transition-colors duration-500 ${
                   deployStep === 'deploying'
                     ? 'bg-primary animate-pulse'
                     : deployStep === 'verifying'
@@ -1071,18 +1179,28 @@ const FormView: React.FC<FormViewProps> = ({
                     : 'bg-border'
                 }`}
               />
+              {/* Step 4: Verify */}
               <div
-                className={`flex-1 h-1 rounded-full ${
-                  deployStep === 'verifying' ? 'bg-primary animate-pulse' : 'bg-border'
+                className={`flex-1 h-1.5 rounded-full transition-colors duration-500 ${
+                  deployStep === 'verifying'
+                    ? 'bg-primary animate-pulse'
+                    : 'bg-border'
                 }`}
               />
-              <div className="flex-1 h-1 rounded-full bg-border" />
             </div>
-            <div className="flex justify-between mt-1">
-              <span className="text-[10px] text-gray-500">Confirm</span>
-              <span className="text-[10px] text-gray-500">Deploy</span>
-              <span className="text-[10px] text-gray-500">Verify</span>
-              <span className="text-[10px] text-gray-500">Complete</span>
+            <div className="flex justify-between mt-1.5">
+              <span className={`text-[10px] ${deployStep === 'fee' ? 'text-warning font-medium' : feeTxHash ? 'text-success' : 'text-gray-500'}`}>
+                Fee
+              </span>
+              <span className={`text-[10px] ${deployStep === 'confirming' ? 'text-primary font-medium' : deployStep === 'deploying' || deployStep === 'verifying' ? 'text-success' : 'text-gray-500'}`}>
+                Deploy
+              </span>
+              <span className={`text-[10px] ${deployStep === 'deploying' ? 'text-primary font-medium' : deployStep === 'verifying' ? 'text-success' : 'text-gray-500'}`}>
+                Confirm
+              </span>
+              <span className={`text-[10px] ${deployStep === 'verifying' ? 'text-primary font-medium' : 'text-gray-500'}`}>
+                Verify
+              </span>
             </div>
           </div>
         </motion.div>

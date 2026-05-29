@@ -2,23 +2,11 @@
  * Deploy Error Parser
  *
  * Parses ethers v6 errors into user-friendly messages.
- * Handles all known error codes and edge cases including:
- *  - "could not coalesce error" (gas estimation failure / RPC parse failure)
- *  - User rejection (code 4001 / ACTION_REJECTED)
- *  - Insufficient funds (INSUFFICIENT_FUNDS)
- *  - Nonce issues (NONCE_EXPIRED, REPLACEMENT_UNDERPRICED)
- *  - Network errors (NETWORK_ERROR, SERVER_ERROR, TIMEOUT)
- *  - Contract revert reasons
+ *
+ * Fix #31: Added rate-limiting / "too many errors" detection.
  */
 
-/**
- * Extract the most useful error message from an ethers v6 error object.
- *
- * ethers v6 wraps errors in complex structures. This function walks the
- * error chain to find the most relevant message.
- */
 function extractDeepMessage(err: any): string {
-  // ethers v6 often nests errors: err.info?.error?.message or err.error?.message
   const candidates: string[] = [];
 
   if (typeof err === 'string') return err;
@@ -30,7 +18,6 @@ function extractDeepMessage(err: any): string {
   if (err?.error?.message) candidates.push(err.error.message);
   if (err?.data?.message) candidates.push(err.data.message);
 
-  // Return the shortest non-generic message (most specific)
   const filtered = candidates.filter(
     (m) => m && !m.includes('could not coalesce error')
   );
@@ -38,16 +25,10 @@ function extractDeepMessage(err: any): string {
   return filtered[0] || candidates[0] || 'Unknown error';
 }
 
-/**
- * Extract ethers v6 error code from the error object.
- */
 function extractErrorCode(err: any): string | null {
   return err?.code || err?.error?.code || err?.info?.error?.code || null;
 }
 
-/**
- * Detect if the error is related to insufficient gas/funds.
- */
 function isInsufficientFundsError(err: any): boolean {
   const code = extractErrorCode(err);
   const msg = extractDeepMessage(err).toLowerCase();
@@ -63,9 +44,6 @@ function isInsufficientFundsError(err: any): boolean {
   );
 }
 
-/**
- * Detect if the error is a user rejection.
- */
 function isUserRejection(err: any): boolean {
   const code = extractErrorCode(err);
   const numCode = err?.code || err?.error?.code;
@@ -81,23 +59,11 @@ function isUserRejection(err: any): boolean {
   );
 }
 
-/**
- * Detect if the error is a "could not coalesce" error from ethers v6.
- *
- * This happens when ethers fails to parse the RPC's error response,
- * typically during gas estimation. Common causes:
- *  - Not enough native tokens to pay for gas
- *  - RPC returns non-standard error format (common on custom chains)
- *  - Contract deployment would revert but the revert reason can't be decoded
- */
 function isCoalesceError(err: any): boolean {
   const msg = extractDeepMessage(err).toLowerCase();
   return msg.includes('could not coalesce error') || msg.includes('coalesce');
 }
 
-/**
- * Detect if the error is a nonce conflict.
- */
 function isNonceError(err: any): boolean {
   const code = extractErrorCode(err);
   const msg = extractDeepMessage(err).toLowerCase();
@@ -110,9 +76,6 @@ function isNonceError(err: any): boolean {
   );
 }
 
-/**
- * Detect network/RPC errors.
- */
 function isNetworkError(err: any): boolean {
   const code = extractErrorCode(err);
   const msg = extractDeepMessage(err).toLowerCase();
@@ -130,25 +93,52 @@ function isNetworkError(err: any): boolean {
 }
 
 /**
- * Parse a deployment error into a user-friendly message.
+ * Fix #31: Detect ethers v6 rate-limiting / "too many errors" state.
  *
- * @param err - The raw error from ethers / MetaMask
- * @param phase - Which phase the error occurred in: 'send' (creating tx) or 'confirm' (waiting for confirmation)
- * @returns A human-readable error message
+ * ethers v6 tracks RPC errors per-provider. When the error count exceeds
+ * a threshold, the provider enters a "paused" state and refuses new requests,
+ * returning: "RPC endpoint returned too many errors, retrying in X minutes."
  */
-export function parseDeployError(err: unknown, phase: 'send' | 'confirm'): string {
+export function isRateLimitError(err: any): boolean {
+  const msg = extractDeepMessage(err).toLowerCase();
+
+  return (
+    msg.includes('too many errors') ||
+    msg.includes('too many request') ||
+    msg.includes('rate limit') ||
+    msg.includes('retrying in') ||
+    msg.includes('429') ||
+    msg.includes('throttl')
+  );
+}
+
+/**
+ * Parse a deployment error into a user-friendly message.
+ */
+export function parseDeployError(err: unknown, phase: 'send' | 'confirm' | 'fee'): string {
   if (!err) return 'An unknown error occurred during deployment.';
 
   const error = err as any;
 
   // --- User Rejection ---
   if (isUserRejection(error)) {
+    if (phase === 'fee') {
+      return 'Fee payment was rejected in your wallet. No tokens were deployed and no fees were charged.';
+    }
     return 'Transaction was rejected in your wallet. No tokens were deployed and no gas was spent.';
   }
 
-  // --- "Could not coalesce error" (ethers v6 specific) ---
+  // --- Rate Limiting (Fix #31) ---
+  if (isRateLimitError(error)) {
+    return (
+      'The RPC endpoint is temporarily rate-limited.\n\n' +
+      'This happens when too many requests are sent in quick succession. ' +
+      'Please wait 30-60 seconds and try again. The deployment will use a fresh connection on retry.'
+    );
+  }
+
+  // --- "Could not coalesce error" ---
   if (isCoalesceError(error)) {
-    // Try to find a more specific cause
     if (isInsufficientFundsError(error)) {
       return (
         'Insufficient LIT balance to cover gas fees.\n\n' +
@@ -158,17 +148,23 @@ export function parseDeployError(err: unknown, phase: 'send' | 'confirm'): strin
     }
 
     return (
-      'The deployment transaction failed during gas estimation.\n\n' +
+      'The RPC returned an unexpected response.\n\n' +
       'This usually means one of:\n' +
       '• Your wallet doesn\'t have enough LIT for gas fees\n' +
-      '• The LitVM RPC returned an unexpected response\n' +
+      '• The LitVM RPC is temporarily overloaded\n' +
       '• The contract constructor would revert\n\n' +
-      'Try: Check your LIT balance, refresh the page, or switch to a different RPC endpoint.'
+      'Try: Wait a moment, then try again. The deployer will use a fresh connection.'
     );
   }
 
   // --- Insufficient Funds ---
   if (isInsufficientFundsError(error)) {
+    if (phase === 'fee') {
+      return (
+        'Insufficient LIT balance to pay the 0.1 LIT deployment fee.\n\n' +
+        'Please ensure your wallet has at least 0.1 LIT plus gas fees and try again.'
+      );
+    }
     return (
       'Insufficient LIT balance to cover gas fees.\n\n' +
       'Deploying a contract requires native LIT tokens for gas. ' +
@@ -231,10 +227,15 @@ export function parseDeployError(err: unknown, phase: 'send' | 'confirm'): strin
 
   // --- Generic Fallback ---
   const deepMsg = extractDeepMessage(error);
-  const phaseName = phase === 'send' ? 'sending' : 'confirming';
+  const phaseNames: Record<string, string> = {
+    send: 'sending the deployment transaction',
+    confirm: 'confirming the deployment',
+    fee: 'sending the deployment fee',
+  };
+  const phaseName = phaseNames[phase] || 'deploying';
 
   return (
-    `Error ${phaseName} the deployment transaction.\n\n` +
+    `Error ${phaseName}.\n\n` +
     `Details: ${deepMsg.slice(0, 200)}`
   );
 }

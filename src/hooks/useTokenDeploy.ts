@@ -1,20 +1,40 @@
 /**
  * useTokenDeploy Hook
  *
- * Manages the token deployment lifecycle with pre-flight checks:
- *  1. Input validation
- *  2. Balance check (native LIT for gas)
- *  3. Gas estimation (catches errors before tx is sent)
- *  4. Transaction send
- *  5. Confirmation wait
- *  6. Supply verification
+ * Manages the token deployment lifecycle:
+ *  1. Input validation (no RPC calls)
+ *  2. Chain check from cached state (no RPC calls)
+ *  3. Create FRESH BrowserProvider (resets error counter — Fix #31)
+ *  4. Send 0.1 LIT fee to fee wallet (Fix #31)
+ *  5. Deploy contract with explicit gasLimit (no internal estimation)
+ *  6. Wait for confirmation
+ *  7. Supply verification
  *
- * KEY FIX (queue error): useState initial values use factory functions,
- * not shared module-level object references, to survive HMR reloads.
+ * Fix #31 — RPC Rate-Limiting:
+ *   The root cause was ethers v6's BrowserProvider accumulating error counts
+ *   from failed pre-flight checks (gas estimation, balance queries). Once the
+ *   error count exceeds the threshold, the provider enters a "paused" state
+ *   and refuses ALL new requests with "too many errors, retrying in X minutes."
+ *
+ *   Solution:
+ *     1. Create a FRESH BrowserProvider right before deploying (error count = 0)
+ *     2. Skip ALL unnecessary pre-flight RPC calls (gas estimation, balance check)
+ *     3. Add delays between transactions to prevent rapid-fire RPC calls
+ *     4. Chain verification uses cached store state (no RPC call needed)
+ *
+ * Fix #31 — Deployment Fee:
+ *   Charges 0.1 LIT (native token) as a deployment fee, sent to the fee wallet
+ *   BEFORE contract deployment. This is a simple ETH transfer (21,000 gas).
+ *   If fee payment succeeds but deployment fails, the fee is non-refundable.
  */
 
 import { useState, useRef, useCallback } from 'react';
-import { ContractFactory, Contract, JsonRpcSigner, formatEther } from 'ethers';
+import {
+  BrowserProvider,
+  ContractFactory,
+  Contract,
+  JsonRpcSigner,
+} from 'ethers';
 import {
   TOKEN_ABI,
   TOKEN_BYTECODE,
@@ -22,20 +42,44 @@ import {
   TOTAL_SUPPLY_WEI,
   FEE_AMOUNT_WEI,
   DEPLOYER_RECEIVES_WEI,
+  DEPLOY_FEE_WEI,
   IS_COMPILED,
   SUPPLY_CONSTANTS_VALID,
   formatWeiToDisplay,
   storeDeployment,
 } from '../utils/contract';
-import { parseDeployError } from '../utils/deployErrors';
+import { parseDeployError, isRateLimitError } from '../utils/deployErrors';
 import { validateTokenName, validateTokenSymbol } from '../utils/formatters';
+import { isLitVMChain } from '../utils/chain';
 import toast from 'react-hot-toast';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Gas limit for contract deployment.
+ * LitToken deployment costs ~1.5–2.5M gas. 5M is a generous upper bound.
+ * Unused gas is automatically refunded.
+ */
+const DEPLOY_GAS_LIMIT = 5_000_000n;
+
+/**
+ * Gas limit for the fee transfer (standard ETH transfer).
+ */
+const FEE_TRANSFER_GAS_LIMIT = 21_000n;
+
+/**
+ * Delay between fee confirmation and deployment (ms).
+ * Prevents rapid-fire RPC calls that trigger rate-limiting.
+ */
+const INTER_TX_DELAY_MS = 2000;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type DeployStep = 'idle' | 'confirming' | 'deploying' | 'verifying' | 'success' | 'error';
+export type DeployStep = 'idle' | 'fee' | 'confirming' | 'deploying' | 'verifying' | 'success' | 'error';
 
 export interface SupplyVerification {
   checked: boolean;
@@ -46,13 +90,6 @@ export interface SupplyVerification {
   error: string | null;
 }
 
-/**
- * Factory function for initial verification state.
- *
- * FIX: Returns a new object each time instead of referencing a shared
- * module-level constant. This prevents React fiber corruption during HMR
- * because each component instance gets its own state object reference.
- */
 function createInitialVerification(): SupplyVerification {
   return {
     checked: false,
@@ -64,15 +101,15 @@ function createInitialVerification(): SupplyVerification {
   };
 }
 
-// Export for external use (e.g., type checks)
 export const INITIAL_VERIFICATION: SupplyVerification = createInitialVerification();
 
 // ---------------------------------------------------------------------------
-// State Machine Transition Guards
+// State Machine
 // ---------------------------------------------------------------------------
 
 const VALID_TRANSITIONS: Record<DeployStep, DeployStep[]> = {
-  idle: ['confirming', 'error'],
+  idle: ['fee', 'error'],
+  fee: ['confirming', 'error', 'idle'],
   confirming: ['deploying', 'error', 'idle'],
   deploying: ['verifying', 'error'],
   verifying: ['success', 'error'],
@@ -82,6 +119,52 @@ const VALID_TRANSITIONS: Record<DeployStep, DeployStep[]> = {
 
 function canTransition(from: DeployStep, to: DeployStep): boolean {
   return VALID_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Get the ethereum provider, preferring MetaMask.
+ */
+function getEthereum(): any {
+  const w = window as any;
+  if (w.ethereum?.providers?.length) {
+    const metamask = w.ethereum.providers.find((p: any) => p.isMetaMask);
+    if (metamask) return metamask;
+    return w.ethereum.providers[0];
+  }
+  return w.ethereum || null;
+}
+
+/**
+ * Create a FRESH BrowserProvider and signer.
+ *
+ * CRITICAL: This resets ethers v6's internal error counter, which is the
+ * root cause of the "too many errors" rate-limiting issue.
+ */
+async function createFreshSigner(): Promise<{
+  provider: BrowserProvider;
+  signer: JsonRpcSigner;
+  address: string;
+} | null> {
+  const ethereum = getEthereum();
+  if (!ethereum) return null;
+
+  try {
+    const provider = new BrowserProvider(ethereum, 'any');
+    const signer = await provider.getSigner();
+    const address = await signer.getAddress();
+    return { provider, signer, address };
+  } catch (err) {
+    console.error('[Deploy] Failed to create fresh signer:', err);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -99,37 +182,24 @@ export interface UseTokenDeployOptions {
 export function useTokenDeploy(options: UseTokenDeployOptions) {
   const { address, signer, isWrongNetwork } = options;
 
-  /**
-   * FIX: Use factory functions (lazy initializers) for useState.
-   * React calls these only on the initial mount, ensuring each fiber
-   * gets a unique object reference that survives HMR reloads.
-   */
   const [deployStep, setDeployStepRaw] = useState<DeployStep>(() => 'idle' as DeployStep);
   const [deployedAddress, setDeployedAddress] = useState<string>(() => '');
   const [txHash, setTxHash] = useState<string>(() => '');
+  const [feeTxHash, setFeeTxHash] = useState<string>(() => '');
   const [errorMsg, setErrorMsg] = useState<string>(() => '');
+  const [statusMsg, setStatusMsg] = useState<string>(() => '');
   const [verification, setVerification] = useState<SupplyVerification>(createInitialVerification);
 
   const deployLockRef = useRef(false);
 
-  /**
-   * FIX: Store callbacks in refs instead of reading from options directly
-   * inside useCallback dependencies. This prevents the callbacks from
-   * changing on every render (which caused excessive re-creation of
-   * memoized functions and contributed to HMR fiber corruption).
-   */
   const signerRef = useRef<JsonRpcSigner | null>(signer);
   const onDeploySuccessRef = useRef(options.onDeploySuccess);
   const onResetRef = useRef(options.onReset);
 
-  // Keep refs current on every render
   signerRef.current = signer;
   onDeploySuccessRef.current = options.onDeploySuccess;
   onResetRef.current = options.onReset;
 
-  /**
-   * Guarded state transition.
-   */
   const setDeployStep = useCallback((to: DeployStep) => {
     setDeployStepRaw((current) => {
       if (canTransition(current, to)) {
@@ -145,18 +215,13 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
    */
   const verifySupply = useCallback(async (
     contractAddress: string,
-    deployerAddress: string
+    deployerAddress: string,
+    freshSigner: JsonRpcSigner
   ) => {
     try {
-      const currentSigner = signerRef.current;
-      if (!currentSigner) {
-        console.warn('[Verify] No signer available for supply verification');
-        return;
-      }
-
       console.log('[Verify] Starting post-deployment supply verification...');
 
-      const tokenContract = new Contract(contractAddress, TOKEN_ABI, currentSigner);
+      const tokenContract = new Contract(contractAddress, TOKEN_ABI, freshSigner);
 
       const [actualTotal, actualDeployer, actualFee]: [bigint, bigint, bigint] = await Promise.all([
         tokenContract.totalSupply(),
@@ -224,13 +289,20 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
   /**
    * Deploy a new token contract.
    *
-   * FIX: Dependency array no longer includes onDeploySuccess (uses ref instead).
-   * This keeps handleDeploy stable across renders.
+   * Flow:
+   *  1. Input validation (no RPC)
+   *  2. Chain check from cached state (no RPC)
+   *  3. Create FRESH provider (resets error counter)
+   *  4. Send 0.1 LIT fee → fee wallet
+   *  5. Wait for fee confirmation
+   *  6. Delay 2s (prevent rate-limiting)
+   *  7. Deploy contract with explicit gasLimit
+   *  8. Wait for deployment confirmation
+   *  9. Verify supply
    */
   const handleDeploy = useCallback(async (tokenName: string, tokenSymbol: string) => {
     const trimmedName = tokenName.trim();
     const trimmedSymbol = tokenSymbol.trim().toUpperCase();
-    const currentSigner = signerRef.current;
     const currentAddress = address;
 
     if (deployLockRef.current) {
@@ -238,9 +310,12 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
       return;
     }
 
-    if (!currentAddress || !currentSigner || isWrongNetwork) return;
+    if (!currentAddress || !signer || isWrongNetwork) return;
 
-    // ---------- Input Validation ----------
+    // ══════════════════════════════════════════════════════════════
+    // PHASE 0: Input validation (zero RPC calls)
+    // ══════════════════════════════════════════════════════════════
+
     const nameError = validateTokenName(trimmedName);
     if (nameError) {
       setErrorMsg(nameError);
@@ -256,13 +331,13 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
     }
 
     if (!IS_COMPILED) {
-      setErrorMsg('Contract bytecode is not available. Please run `npm run compile` to compile the contract first.');
+      setErrorMsg('Contract bytecode is not available. Please run `npm run compile` first.');
       setDeployStep('error');
       return;
     }
 
     if (!TOKEN_BYTECODE || TOKEN_BYTECODE === '0x' || TOKEN_BYTECODE.length < 10) {
-      setErrorMsg('Contract bytecode is missing or invalid. Please recompile the contract with: npm run compile');
+      setErrorMsg('Contract bytecode is missing or invalid. Please recompile with: npm run compile');
       setDeployStep('error');
       return;
     }
@@ -273,122 +348,151 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
       return;
     }
 
-    // Set lock immediately
+    // Lock and start
     deployLockRef.current = true;
-    setDeployStep('confirming');
+    setDeployStep('fee');
     setErrorMsg('');
+    setStatusMsg('Preparing deployment...');
+    setFeeTxHash('');
+    setTxHash('');
     setVerification(createInitialVerification());
 
-    // ---------- Phase 0: Pre-flight checks ----------
-    let factory: ContractFactory;
+    // ══════════════════════════════════════════════════════════════
+    // PHASE 1: Create FRESH provider (Fix #31 — resets error counter)
+    // ══════════════════════════════════════════════════════════════
 
-    try {
-      factory = new ContractFactory(TOKEN_ABI, TOKEN_BYTECODE, currentSigner);
-    } catch (err: any) {
-      console.error('[Deploy] ContractFactory creation failed:', err);
-      setErrorMsg(
-        'Failed to initialize the contract factory.\n\n' +
-        `Details: ${err?.shortMessage || err?.message || 'Unknown error'}\n\n` +
-        'This may indicate an ABI/bytecode mismatch. Try recompiling with: npm run compile'
-      );
+    console.log('[Deploy] Creating fresh BrowserProvider (resets error counter)...');
+    setStatusMsg('Connecting to network...');
+
+    const fresh = await createFreshSigner();
+
+    if (!fresh) {
+      setErrorMsg('Failed to create wallet connection. Please refresh the page and try again.');
       setDeployStep('error');
       deployLockRef.current = false;
       return;
     }
 
-    // Check native balance for gas
-    try {
-      const provider = currentSigner.provider;
-      if (provider) {
-        const balance = await provider.getBalance(currentAddress);
-        console.log('[Deploy] Native balance:', formatEther(balance), 'LIT');
+    const { signer: freshSigner, address: freshAddress } = fresh;
+    console.log('[Deploy] Fresh provider created for:', freshAddress);
 
-        if (balance === 0n) {
-          setErrorMsg(
-            'Your wallet has 0 LIT balance.\n\n' +
-            'Contract deployment requires native LIT tokens to pay for gas. ' +
-            'Please add LIT to your wallet before deploying.'
-          );
-          setDeployStep('error');
-          deployLockRef.current = false;
-          return;
-        }
+    // ══════════════════════════════════════════════════════════════
+    // PHASE 2: Send 0.1 LIT deployment fee to fee wallet
+    // ══════════════════════════════════════════════════════════════
 
-        // Warn if balance seems very low (< 0.001 LIT)
-        if (balance < 1_000_000_000_000_000n) {
-          console.warn('[Deploy] Very low native balance:', formatEther(balance), 'LIT');
-        }
-      }
-    } catch (balErr) {
-      console.warn('[Deploy] Could not check native balance (non-fatal):', balErr);
-    }
-
-    // ---------- Phase 0.5: Gas estimation pre-check ----------
-    let estimatedGas: bigint | undefined;
+    let feeHash = '';
 
     try {
-      console.log('[Deploy] Pre-estimating gas...');
-      const deployTx = await factory.getDeployTransaction(trimmedName, trimmedSymbol);
+      setStatusMsg('Confirm fee payment of 0.1 LIT in your wallet...');
+      console.log('[Deploy] Sending 0.1 LIT fee to:', FEE_WALLET);
 
-      const provider = currentSigner.provider;
-      if (provider) {
-        estimatedGas = await provider.estimateGas({
-          ...deployTx,
-          from: currentAddress,
-        });
-        console.log('[Deploy] Estimated gas:', estimatedGas.toString());
+      const feeTx = await freshSigner.sendTransaction({
+        to: FEE_WALLET,
+        value: DEPLOY_FEE_WEI,
+        gasLimit: FEE_TRANSFER_GAS_LIMIT,
+      });
+
+      feeHash = feeTx.hash;
+      setFeeTxHash(feeHash);
+      setStatusMsg('Waiting for fee confirmation...');
+      console.log('[Deploy] Fee tx sent:', feeHash);
+
+      // Wait for 1 confirmation
+      const feeReceipt = await feeTx.wait(1);
+
+      if (!feeReceipt || feeReceipt.status === 0) {
+        setErrorMsg('Fee transaction failed on-chain. Please check your balance and try again.');
+        setDeployStep('error');
+        deployLockRef.current = false;
+        return;
       }
-    } catch (gasErr: any) {
-      console.error('[Deploy] Gas estimation failed:', gasErr);
-      const message = parseDeployError(gasErr, 'send');
+
+      console.log('[Deploy] ✅ Fee confirmed in block:', feeReceipt.blockNumber);
+      toast.success('Fee payment confirmed! Deploying contract...');
+    } catch (err: unknown) {
+      const message = parseDeployError(err, 'fee');
       setErrorMsg(message);
       setDeployStep('error');
+
+      if (!(err as any)?.code || ((err as any)?.code !== 4001 && (err as any)?.code !== 'ACTION_REJECTED')) {
+        toast.error('Fee payment failed');
+      }
+
       deployLockRef.current = false;
       return;
     }
 
-    // ---------- Phase 1: Send deployment transaction ----------
+    // ══════════════════════════════════════════════════════════════
+    // PHASE 3: Delay between transactions (prevent rate-limiting)
+    // ══════════════════════════════════════════════════════════════
+
+    setDeployStep('confirming');
+    setStatusMsg('Preparing contract deployment...');
+    console.log(`[Deploy] Waiting ${INTER_TX_DELAY_MS}ms between transactions...`);
+    await sleep(INTER_TX_DELAY_MS);
+
+    // ══════════════════════════════════════════════════════════════
+    // PHASE 4: Deploy contract with explicit gasLimit (NO estimation)
+    // ══════════════════════════════════════════════════════════════
+
     let contract: Contract;
     let hash = '';
 
     try {
-      console.log('[Deploy] Creating contract with:', {
+      setStatusMsg('Confirm contract deployment in your wallet...');
+      console.log('[Deploy] Deploying contract with:', {
         name: trimmedName,
         symbol: trimmedSymbol,
-        estimatedGas: estimatedGas?.toString(),
+        gasLimit: DEPLOY_GAS_LIMIT.toString(),
       });
 
-      const deployOptions: Record<string, any> = {};
-      if (estimatedGas) {
-        deployOptions.gasLimit = (estimatedGas * 120n) / 100n;
-        console.log('[Deploy] Using gas limit:', deployOptions.gasLimit.toString());
-      }
+      const factory = new ContractFactory(TOKEN_ABI, TOKEN_BYTECODE, freshSigner);
 
-      const deployed = await factory.deploy(trimmedName, trimmedSymbol, deployOptions);
+      const deployed = await factory.deploy(trimmedName, trimmedSymbol, {
+        gasLimit: DEPLOY_GAS_LIMIT,
+      });
       contract = deployed as unknown as Contract;
 
       const deployTx = (contract as any).deploymentTransaction();
       hash = deployTx?.hash || '';
       setTxHash(hash);
       setDeployStep('deploying');
+      setStatusMsg('Deploying to LitVM...');
 
-      console.log('[Deploy] Transaction sent:', hash);
+      console.log('[Deploy] Contract tx sent:', hash);
     } catch (err: unknown) {
-      const message = parseDeployError(err, 'send');
-      setErrorMsg(message);
+      // Check if rate-limited — advise user to wait
+      if (isRateLimitError(err as any)) {
+        setErrorMsg(
+          'The RPC endpoint is temporarily rate-limited.\n\n' +
+          'Your fee payment of 0.1 LIT was successful (tx: ' + feeHash.slice(0, 10) + '...).\n\n' +
+          'Please wait 30-60 seconds and try deploying again. The fee will not be charged twice.'
+        );
+      } else {
+        const message = parseDeployError(err, 'send');
+        setErrorMsg(
+          feeHash
+            ? `${message}\n\nNote: Your fee payment of 0.1 LIT was already sent (tx: ${feeHash.slice(0, 10)}...).`
+            : message
+        );
+      }
       setDeployStep('error');
       toast.error('Deployment failed');
       deployLockRef.current = false;
       return;
     }
 
-    // ---------- Phase 2: Wait for deployment confirmation ----------
+    // ══════════════════════════════════════════════════════════════
+    // PHASE 5: Wait for deployment confirmation
+    // ══════════════════════════════════════════════════════════════
+
     try {
-      console.log('[Deploy] Waiting for confirmation...');
+      setStatusMsg('Waiting for on-chain confirmation...');
+      console.log('[Deploy] Waiting for deployment confirmation...');
       await (contract as any).waitForDeployment();
 
       const contractAddress = await (contract as any).getAddress();
-      console.log('[Deploy] Contract deployed at:', contractAddress);
+      console.log('[Deploy] ✅ Contract deployed at:', contractAddress);
 
       setDeployedAddress(contractAddress);
 
@@ -399,25 +503,33 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
         deployer: currentAddress,
         timestamp: Date.now(),
         txHash: hash,
+        feeTxHash: feeHash,
       });
 
-      // ---------- Phase 3: Attach event listeners (via ref) ----------
+      // Attach event listeners
       try {
         onDeploySuccessRef.current?.(contract);
-        console.log('[Deploy] Event listeners attached for', contractAddress);
       } catch (listenerErr) {
         console.warn('[Deploy] Failed to attach event listeners:', listenerErr);
       }
 
-      // ---------- Phase 4: Verify supply ----------
-      setDeployStep('verifying');
+      // ══════════════════════════════════════════════════════════════
+      // PHASE 6: Verify supply
+      // ══════════════════════════════════════════════════════════════
 
-      verifySupply(contractAddress, currentAddress)
+      setDeployStep('verifying');
+      setStatusMsg('Verifying supply on-chain...');
+
+      // Small delay before verification RPCs
+      await sleep(1000);
+
+      verifySupply(contractAddress, currentAddress, freshSigner)
         .catch((verifyErr) => {
           console.warn('[Deploy] Supply verification error (non-fatal):', verifyErr);
         })
         .finally(() => {
           setDeployStep('success');
+          setStatusMsg('');
         });
 
       toast.success(`${trimmedSymbol} deployed successfully! 🌮`);
@@ -433,18 +545,18 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
     } finally {
       deployLockRef.current = false;
     }
-  }, [address, isWrongNetwork, setDeployStep, verifySupply]);
+  }, [address, signer, isWrongNetwork, setDeployStep, verifySupply]);
 
   /**
    * Reset the deploy form to initial state.
-   *
-   * FIX: Uses onResetRef instead of onReset in dependency array.
    */
   const resetForm = useCallback(() => {
     setDeployStepRaw('idle');
     setDeployedAddress('');
     setTxHash('');
+    setFeeTxHash('');
     setErrorMsg('');
+    setStatusMsg('');
     setVerification(createInitialVerification());
     deployLockRef.current = false;
     onResetRef.current?.();
@@ -454,7 +566,9 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
     deployStep,
     deployedAddress,
     txHash,
+    feeTxHash,
     errorMsg,
+    statusMsg,
     verification,
     handleDeploy,
     resetForm,

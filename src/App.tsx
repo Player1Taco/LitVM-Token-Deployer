@@ -6,6 +6,12 @@ import TokenDeployer from './components/TokenDeployer';
 import DeploymentHistory from './components/DeploymentHistory';
 import { useWallet } from './hooks/useWallet';
 
+/**
+ * App Root
+ *
+ * Fix #28: "Made by" credit moved into Header (top banner).
+ *          Footer is now minimal — just a status indicator.
+ */
 const App: React.FC = () => {
   const { error } = useWallet();
 
@@ -34,7 +40,8 @@ const App: React.FC = () => {
       <BackgroundEffects />
       <Header />
 
-      <main className="relative z-10 pt-28 pb-20 px-4">
+      {/* pt-32 accounts for header (h-16) + top banner (h-8) + spacing */}
+      <main className="relative z-10 pt-32 pb-20 px-4">
         {/* Wallet Error Banner */}
         {error && (
           <div className="max-w-2xl mx-auto mb-6">
@@ -48,34 +55,12 @@ const App: React.FC = () => {
         <TokenDeployer />
         <DeploymentHistory />
 
-        {/* Footer */}
-        <footer className="mt-20 text-center space-y-4">
+        {/* Minimal Footer */}
+        <footer className="mt-20 text-center">
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full glass">
             <div className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
-            <span className="text-xs text-gray-500">Powered by LitVM • LitVM Chain Only</span>
+            <span className="text-xs text-gray-500">Powered by LitVM • Chain 4693</span>
             <span className="text-sm">🌮</span>
-          </div>
-
-          {/* Branding */}
-          <div className="flex items-center justify-center gap-1.5 text-sm text-gray-500">
-            <span>made by</span>
-            <a
-              href="https://x.com/Player1Taco"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-semibold text-primary hover:text-primary/80 transition-colors underline underline-offset-2 decoration-primary/30 hover:decoration-primary/60"
-            >
-              Player1Taco
-            </a>
-            <span>on</span>
-            <a
-              href="https://dappit.io"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-semibold text-secondary hover:text-secondary/80 transition-colors underline underline-offset-2 decoration-secondary/30 hover:decoration-secondary/60"
-            >
-              Dappit.io
-            </a>
           </div>
         </footer>
       </main>

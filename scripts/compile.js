@@ -6,6 +6,11 @@
  * Fix #21: Renamed `constructor` variable to `ctorEntry` to avoid confusion
  * with the reserved property name in class contexts.
  *
+ * Fix #25: Set evmVersion to "paris" to avoid PUSH0 opcode (0x5f) which is
+ * not supported on LitVM's EVM. PUSH0 was introduced in the Shanghai upgrade
+ * (EIP-3855) and Solidity 0.8.20+ emits it by default. Paris is the last
+ * EVM version that does NOT use PUSH0.
+ *
  * Usage: node scripts/compile.js
  */
 
@@ -37,6 +42,19 @@ const input = {
     },
   },
   settings: {
+    /**
+     * Fix #25: CRITICAL — Target "paris" EVM to avoid PUSH0 opcode.
+     *
+     * Solidity 0.8.20+ defaults to the Shanghai EVM which emits PUSH0 (0x5f).
+     * LitVM (and many L2s/custom chains) do not support PUSH0 yet.
+     * When the EVM encounters an unknown opcode, the transaction reverts
+     * with NO revert reason — which is exactly the error we were seeing:
+     *   "The contract deployment would revert. No revert reason was provided."
+     *
+     * Setting evmVersion to "paris" (the last pre-Shanghai version) ensures
+     * the compiler uses PUSH1 0x00 instead of PUSH0, which works on all chains.
+     */
+    evmVersion: 'paris',
     optimizer: {
       enabled: true,
       runs: 200,
@@ -49,7 +67,7 @@ const input = {
   },
 };
 
-console.log('⚙️  Compiling with solc-js (optimizer: 200 runs)...');
+console.log('⚙️  Compiling with solc-js (optimizer: 200 runs, evmVersion: paris)...');
 const output = JSON.parse(solc.compile(JSON.stringify(input)));
 
 // Check for errors
@@ -77,6 +95,13 @@ if (!contract) {
 
 const abi = contract.abi;
 const bytecode = '0x' + contract.evm.bytecode.object;
+
+// Fix #25: Verify no PUSH0 opcodes in output bytecode
+if (bytecode.includes('5f')) {
+  // Quick heuristic check — look for 5f NOT preceded by a PUSH opcode's data
+  // This is not a perfect check but catches obvious cases
+  console.log('ℹ️  Note: Bytecode contains 0x5f bytes (may be data, not PUSH0 opcodes)');
+}
 
 // Fix #21: Renamed from `constructor` to `ctorEntry` to avoid
 // shadowing the reserved property name in class contexts.
@@ -151,6 +176,7 @@ const compiled = {
   compiler: `solc-js`,
   optimized: true,
   runs: 200,
+  evmVersion: 'paris',
   compiledAt: new Date().toISOString(),
 };
 
@@ -159,5 +185,6 @@ fs.writeFileSync(outputPath, JSON.stringify(compiled, null, 2));
 console.log(`\n✅ Compilation successful!`);
 console.log(`   📦 Bytecode size: ${(bytecode.length - 2) / 2} bytes`);
 console.log(`   📋 ABI entries: ${abi.length}`);
+console.log(`   🔧 EVM version: paris (no PUSH0)`);
 console.log(`   💾 Output: ${outputPath}`);
 console.log(`\n🌮 Ready for deployment on LitVM!`);

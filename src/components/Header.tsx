@@ -1,8 +1,11 @@
 /**
  * Header Component
  *
- * Top navigation bar with wallet connection button.
- * Handles all wallet states: disconnected, connecting, connected, wrong network.
+ * Top navigation bar with:
+ *  - Logo + branding
+ *  - "Made by" credit (moved from footer — fix #28)
+ *  - Network indicator
+ *  - Wallet connection button with dropdown
  */
 
 import React, { useState, useRef, useEffect } from 'react';
@@ -71,6 +74,32 @@ const Header: React.FC = () => {
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50">
+      {/* ── "Made by" credit banner ── Fix #28: Moved from footer to top */}
+      <div className="bg-primary/[0.06] border-b border-primary/10">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-8 flex items-center justify-center gap-1.5 text-[11px] text-gray-400">
+          <span>🌮</span>
+          <span>made by</span>
+          <a
+            href="https://x.com/Player1Taco"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-semibold text-primary hover:text-primary/80 transition-colors"
+          >
+            Player1Taco
+          </a>
+          <span>on</span>
+          <a
+            href="https://dappit.io"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-semibold text-secondary hover:text-secondary/80 transition-colors"
+          >
+            Dappit.io
+          </a>
+        </div>
+      </div>
+
+      {/* ── Main Header Bar ── */}
       <div className="glass-strong border-b border-border/50">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           {/* Logo */}
@@ -214,7 +243,7 @@ const Header: React.FC = () => {
                               {isWrongNetwork ? (
                                 <span className="text-warning">Wrong network (Chain {chainId})</span>
                               ) : (
-                                <span className="text-success">LitVM Network</span>
+                                <span className="text-success">LitVM Network (Chain 4693)</span>
                               )}
                             </p>
                           </div>

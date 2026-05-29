@@ -3,21 +3,10 @@
  *
  * Main orchestrator for the token deployment flow.
  *
- * Fix #6:  contractRef typed as Contract | null
- * Fix #7:  No non-null assertions
- * Fix #8:  Double-click protection via deployLockRef in useTokenDeploy
- * Fix #9:  Event listener errors caught in useTokenEvents
- * Fix #10: rawValue stored as string in useTokenEvents
- * Fix #13: Signer ref in useTokenDeploy
- * Fix #14: trimmedName/trimmedSymbol memoized
- * Fix #15: Input sanitization via validateTokenName/validateTokenSymbol
- * Fix #16: formatTokenAmount handles NaN/negative/small fractions
- * Fix #17: timeAgo handles future timestamps
- * Fix #18: eventCounter uses useRef in useTokenEvents
- * Fix #19: Progress bar includes verification step
- * Fix #20: State machine transition guards in useTokenDeploy
- * Fix #23: Distribution bar uses proper overflow handling
- * Fix #26: Decomposed into hooks (useTokenDeploy, useTokenEvents)
+ * FIX (queue error): All callbacks passed to useTokenDeploy are now
+ * memoized with useCallback so they have stable references across renders.
+ * This prevents useCallback dependency churn inside useTokenDeploy which
+ * was contributing to React fiber state corruption during HMR reloads.
  */
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
@@ -72,7 +61,7 @@ const TokenDeployer: React.FC = () => {
   const [tokenName, setTokenName] = useState('');
   const [tokenSymbol, setTokenSymbol] = useState('');
 
-  // Extracted hooks (fix #26)
+  // Extracted hooks
   const {
     tokenEvents,
     isListening,
@@ -80,6 +69,20 @@ const TokenDeployer: React.FC = () => {
     cleanupListeners,
     clearEvents,
   } = useTokenEvents();
+
+  /**
+   * FIX: Memoize callbacks with useCallback so useTokenDeploy receives
+   * stable references. Previously these were inline anonymous functions
+   * that created new references every render, destabilizing the hook.
+   */
+  const handleDeploySuccess = useCallback((contract: Contract) => {
+    attachEventListeners(contract);
+  }, [attachEventListeners]);
+
+  const handleReset = useCallback(() => {
+    cleanupListeners();
+    clearEvents();
+  }, [cleanupListeners, clearEvents]);
 
   const {
     deployStep,
@@ -94,13 +97,8 @@ const TokenDeployer: React.FC = () => {
     address,
     signer,
     isWrongNetwork,
-    onDeploySuccess: (contract: Contract) => {
-      attachEventListeners(contract);
-    },
-    onReset: () => {
-      cleanupListeners();
-      clearEvents();
-    },
+    onDeploySuccess: handleDeploySuccess,
+    onReset: handleReset,
   });
 
   // Cleanup listeners on unmount
@@ -110,7 +108,7 @@ const TokenDeployer: React.FC = () => {
     };
   }, [cleanupListeners]);
 
-  // Fix #14: Memoize derived values
+  // Memoize derived values
   const trimmedName = useMemo(() => tokenName.trim(), [tokenName]);
   const trimmedSymbol = useMemo(() => tokenSymbol.trim().toUpperCase(), [tokenSymbol]);
 
@@ -342,7 +340,7 @@ const TokenDeployer: React.FC = () => {
 };
 
 // ---------------------------------------------------------------------------
-// Sub-components (fix #26: decomposition)
+// Sub-components
 // ---------------------------------------------------------------------------
 
 interface SuccessViewProps {
@@ -560,7 +558,7 @@ const VerificationPanel: React.FC<VerificationPanelProps> = ({ verification, dep
       )}
     </AnimatePresence>
 
-    {/* Verification Loading State (fix #19: shows during 'verifying' step) */}
+    {/* Verification Loading State */}
     <AnimatePresence>
       {!verification.checked && (deployStep === 'success' || deployStep === 'verifying') && (
         <motion.div
@@ -904,7 +902,7 @@ const FormView: React.FC<FormViewProps> = ({
       </div>
     </div>
 
-    {/* Token Distribution Preview (fix #23: overflow-hidden on container) */}
+    {/* Token Distribution Preview */}
     <div className="glass rounded-xl p-4 mb-6 space-y-3">
       <p className="text-xs text-gray-500 uppercase tracking-wider font-medium">Token Distribution</p>
 
@@ -924,7 +922,6 @@ const FormView: React.FC<FormViewProps> = ({
         <span className="text-sm font-mono text-accent font-medium">{FEE_AMOUNT}</span>
       </div>
 
-      {/* Fix #23: Use calc() and overflow-hidden to prevent bar overflow */}
       <div className="w-full h-2 bg-background/80 rounded-full overflow-hidden">
         <div className="flex h-full w-full">
           <div
@@ -1010,7 +1007,7 @@ const FormView: React.FC<FormViewProps> = ({
       </motion.button>
     )}
 
-    {/* Loading States (fix #19: includes verification step) */}
+    {/* Loading States */}
     <AnimatePresence>
       {(deployStep === 'confirming' || deployStep === 'deploying' || deployStep === 'verifying') && (
         <motion.div
@@ -1058,7 +1055,7 @@ const FormView: React.FC<FormViewProps> = ({
               </div>
             )}
 
-            {/* Fix #19: 4-step progress bar including verification */}
+            {/* 4-step progress bar */}
             <div className="flex items-center gap-2 mt-4">
               <div
                 className={`flex-1 h-1 rounded-full ${

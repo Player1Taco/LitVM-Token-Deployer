@@ -1,125 +1,148 @@
 /**
- * Formatting Helpers
+ * Formatting Utilities
  *
- * Extracted from TokenDeployer to reduce component size (fix #26).
- * Fixes issues #16 (formatTokenAmount edge cases), #17 (timeAgo future timestamps).
+ * Fix #16: formatTokenAmount handles NaN, negative, and very small fractions
+ * Fix #17: timeAgo handles future timestamps gracefully
  */
+
+import { formatUnits } from 'ethers';
 
 /**
- * Formats a token amount string to a human-readable abbreviated form.
+ * Format a token amount (string in token units) for display.
  *
- * Fix #16: Handles negative values, NaN, very small fractions.
+ * Fix #16: Handles NaN, negative, very small fractions, and very large values.
  *
- * @param value - String representation of a token amount (e.g. "999990000.0")
+ * @param value - Token amount as a string (e.g., "999990000.0" or wei BigInt)
+ * @returns Formatted string like "999.99M", "10K", "1.5", etc.
  */
-export function formatTokenAmount(value: string): string {
-  const num = parseFloat(value);
+export function formatTokenAmount(value: string | bigint): string {
+  let numStr: string;
 
-  // Handle NaN and non-numeric strings
-  if (isNaN(num) || !isFinite(num)) return value;
+  if (typeof value === 'bigint') {
+    numStr = formatUnits(value, 18);
+  } else {
+    numStr = value;
+  }
 
-  // Handle negative values (shouldn't happen for token amounts, but guard)
-  if (num < 0) return '-' + formatTokenAmount(String(Math.abs(num)));
+  const num = parseFloat(numStr);
 
-  // Handle zero
+  if (isNaN(num)) return '0';
+  if (num < 0) return `-${formatTokenAmount(Math.abs(num).toString())}`;
   if (num === 0) return '0';
 
-  // Handle very small fractions (< 0.0001)
-  if (num > 0 && num < 0.0001) {
-    return '<0.0001';
+  // Very small fractions
+  if (num > 0 && num < 0.0001) return '<0.0001';
+  if (num < 1) return num.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+
+  // Billions
+  if (num >= 1_000_000_000) {
+    const b = num / 1_000_000_000;
+    return `${b % 1 === 0 ? b.toFixed(0) : b.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}B`;
   }
 
-  if (num >= 1_000_000_000) {
-    return (num / 1_000_000_000).toFixed(2).replace(/\.?0+$/, '') + 'B';
-  }
+  // Millions
   if (num >= 1_000_000) {
-    return (num / 1_000_000).toFixed(2).replace(/\.?0+$/, '') + 'M';
+    const m = num / 1_000_000;
+    return `${m % 1 === 0 ? m.toFixed(0) : m.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}M`;
   }
+
+  // Thousands
   if (num >= 1_000) {
-    return (num / 1_000).toFixed(2).replace(/\.?0+$/, '') + 'K';
+    const k = num / 1_000;
+    return `${k % 1 === 0 ? k.toFixed(0) : k.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}K`;
   }
-  return num.toLocaleString('en-US', {
-    maximumFractionDigits: 4,
-    minimumFractionDigits: 0,
-  });
+
+  // Under 1000
+  if (num % 1 === 0) return num.toFixed(0);
+  return num.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 /**
- * Formats a timestamp into a human-readable "time ago" string.
+ * Convert a timestamp to a relative time string.
  *
- * Fix #17: Handles future timestamps gracefully by returning "just now"
- * instead of negative values.
+ * Fix #17: Handles future timestamps gracefully.
  *
  * @param timestamp - Unix timestamp in milliseconds
+ * @returns String like "2s ago", "5m ago", "just now", "in 3s" (for future)
  */
 export function timeAgo(timestamp: number): string {
-  const seconds = Math.floor((Date.now() - timestamp) / 1000);
+  const now = Date.now();
+  const diff = now - timestamp;
 
-  // Fix #17: Guard against future timestamps (clock skew)
-  if (seconds < 0) return 'just now';
+  // Future timestamp (Fix #17)
+  if (diff < 0) {
+    const absDiff = Math.abs(diff);
+    if (absDiff < 5000) return 'just now';
+    if (absDiff < 60_000) return `in ${Math.floor(absDiff / 1000)}s`;
+    return 'in the future';
+  }
 
-  if (seconds < 5) return 'just now';
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  if (diff < 5000) return 'just now';
+  if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`;
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
 /**
- * Truncates an Ethereum address for display.
- * e.g. "0x1234...abcd"
+ * Truncate an Ethereum address for display.
+ *
+ * @param address - Full address string
+ * @param startLen - Number of characters to show at start (default 6)
+ * @param endLen - Number of characters to show at end (default 4)
+ * @returns Truncated address like "0x1234...abcd"
  */
-export function truncateAddress(addr: string): string {
-  if (!addr || addr.length < 12) return addr;
-  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+export function truncateAddress(address: string, startLen = 6, endLen = 4): string {
+  if (!address || address.length <= startLen + endLen) return address;
+  return `${address.slice(0, startLen)}...${address.slice(-endLen)}`;
 }
 
 /**
- * Regex for allowed token name characters.
- * Allows alphanumeric, spaces, hyphens, underscores, and periods.
- * Blocks emojis, control characters, zero-width chars, HTML entities.
+ * Validate a token name for deployment.
  *
- * Fix #15: Input sanitization for special characters.
- */
-const VALID_TOKEN_NAME_REGEX = /^[a-zA-Z0-9 \-_.()]+$/;
-
-/**
- * Regex for allowed token symbol characters.
- * Allows uppercase alphanumeric only.
- */
-const VALID_TOKEN_SYMBOL_REGEX = /^[A-Z0-9]+$/;
-
-/**
- * Validates a token name string.
- * Returns an error message string if invalid, or null if valid.
+ * Fix #15: Input sanitization.
  *
- * Fix #15: Sanitizes against special characters, emojis, control chars.
+ * @param name - The trimmed token name
+ * @returns Error message string, or null if valid
  */
 export function validateTokenName(name: string): string | null {
-  const trimmed = name.trim();
-  if (trimmed.length === 0) return 'Token name cannot be empty.';
-  if (trimmed.length > 64) return 'Token name must be 64 characters or less.';
-  if (!VALID_TOKEN_NAME_REGEX.test(trimmed)) {
-    return 'Token name can only contain letters, numbers, spaces, hyphens, underscores, periods, and parentheses.';
+  if (!name || name.length === 0) {
+    return 'Token name is required.';
+  }
+  if (name.length < 2) {
+    return 'Token name must be at least 2 characters.';
+  }
+  if (name.length > 64) {
+    return 'Token name must be 64 characters or fewer.';
+  }
+  // Allow letters, numbers, spaces, hyphens, underscores, dots
+  if (!/^[a-zA-Z0-9\s\-_.]+$/.test(name)) {
+    return 'Token name contains invalid characters. Use letters, numbers, spaces, hyphens, underscores, or dots.';
   }
   return null;
 }
 
 /**
- * Validates a token symbol string.
- * Returns an error message string if invalid, or null if valid.
+ * Validate a token symbol for deployment.
  *
- * Fix #15: Sanitizes against special characters.
+ * Fix #15: Input sanitization.
+ *
+ * @param symbol - The trimmed, uppercased token symbol
+ * @returns Error message string, or null if valid
  */
 export function validateTokenSymbol(symbol: string): string | null {
-  const trimmed = symbol.trim().toUpperCase();
-  if (trimmed.length === 0) return 'Token symbol cannot be empty.';
-  if (trimmed.length > 10) return 'Token symbol must be 10 characters or less.';
-  if (!VALID_TOKEN_SYMBOL_REGEX.test(trimmed)) {
-    return 'Token symbol can only contain uppercase letters and numbers.';
+  if (!symbol || symbol.length === 0) {
+    return 'Token symbol is required.';
+  }
+  if (symbol.length < 2) {
+    return 'Token symbol must be at least 2 characters.';
+  }
+  if (symbol.length > 10) {
+    return 'Token symbol must be 10 characters or fewer.';
+  }
+  // Only uppercase letters and numbers
+  if (!/^[A-Z0-9]+$/.test(symbol)) {
+    return 'Token symbol must contain only uppercase letters and numbers.';
   }
   return null;
 }

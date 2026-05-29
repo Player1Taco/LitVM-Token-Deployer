@@ -1,20 +1,20 @@
 /**
  * useTokenDeploy Hook
  *
- * Manages the token deployment lifecycle: validation, transaction send,
- * confirmation, supply verification, and event listener attachment.
+ * Manages the token deployment lifecycle with pre-flight checks:
+ *  1. Input validation
+ *  2. Balance check (native LIT for gas)
+ *  3. Gas estimation (catches errors before tx is sent)
+ *  4. Transaction send
+ *  5. Confirmation wait
+ *  6. Supply verification
  *
- * Fix #6: contractRef typed as Contract | null.
- * Fix #7: Proper null checks instead of non-null assertions.
- * Fix #8: Deploy lock ref prevents double-click / rapid-fire.
- * Fix #13: Signer ref prevents stale closure issues.
- * Fix #15: Input sanitization via validateTokenName/validateTokenSymbol.
- * Fix #20: State machine transition guards.
- * Fix #26: Extracted from TokenDeployer for decomposition.
+ * KEY FIX (queue error): useState initial values use factory functions,
+ * not shared module-level object references, to survive HMR reloads.
  */
 
 import { useState, useRef, useCallback } from 'react';
-import { ContractFactory, Contract, formatUnits, JsonRpcSigner } from 'ethers';
+import { ContractFactory, Contract, JsonRpcSigner, formatEther } from 'ethers';
 import {
   TOKEN_ABI,
   TOKEN_BYTECODE,
@@ -46,32 +46,40 @@ export interface SupplyVerification {
   error: string | null;
 }
 
-export const INITIAL_VERIFICATION: SupplyVerification = {
-  checked: false,
-  passed: false,
-  actualTotalSupply: null,
-  actualDeployerBalance: null,
-  actualFeeBalance: null,
-  error: null,
-};
+/**
+ * Factory function for initial verification state.
+ *
+ * FIX: Returns a new object each time instead of referencing a shared
+ * module-level constant. This prevents React fiber corruption during HMR
+ * because each component instance gets its own state object reference.
+ */
+function createInitialVerification(): SupplyVerification {
+  return {
+    checked: false,
+    passed: false,
+    actualTotalSupply: null,
+    actualDeployerBalance: null,
+    actualFeeBalance: null,
+    error: null,
+  };
+}
+
+// Export for external use (e.g., type checks)
+export const INITIAL_VERIFICATION: SupplyVerification = createInitialVerification();
 
 // ---------------------------------------------------------------------------
-// State Machine Transition Guards (fix #20)
+// State Machine Transition Guards
 // ---------------------------------------------------------------------------
 
-/** Valid state transitions for the deploy state machine. */
 const VALID_TRANSITIONS: Record<DeployStep, DeployStep[]> = {
   idle: ['confirming', 'error'],
   confirming: ['deploying', 'error', 'idle'],
   deploying: ['verifying', 'error'],
   verifying: ['success', 'error'],
-  success: ['idle'], // Reset form
-  error: ['idle'],   // Try again
+  success: ['idle'],
+  error: ['idle'],
 };
 
-/**
- * Checks if a state transition is valid.
- */
 function canTransition(from: DeployStep, to: DeployStep): boolean {
   return VALID_TRANSITIONS[from]?.includes(to) ?? false;
 }
@@ -89,24 +97,38 @@ export interface UseTokenDeployOptions {
 }
 
 export function useTokenDeploy(options: UseTokenDeployOptions) {
-  const { address, signer, isWrongNetwork, onDeploySuccess, onReset } = options;
-
-  const [deployStep, setDeployStepRaw] = useState<DeployStep>('idle');
-  const [deployedAddress, setDeployedAddress] = useState('');
-  const [txHash, setTxHash] = useState('');
-  const [errorMsg, setErrorMsg] = useState('');
-  const [verification, setVerification] = useState<SupplyVerification>(INITIAL_VERIFICATION);
-
-  // Fix #8: Deploy lock ref for immediate double-click prevention
-  const deployLockRef = useRef(false);
-
-  // Fix #13: Signer ref to prevent stale closure
-  const signerRef = useRef<JsonRpcSigner | null>(signer);
-  signerRef.current = signer;
+  const { address, signer, isWrongNetwork } = options;
 
   /**
-   * Guarded state transition (fix #20).
-   * Only updates state if the transition is valid.
+   * FIX: Use factory functions (lazy initializers) for useState.
+   * React calls these only on the initial mount, ensuring each fiber
+   * gets a unique object reference that survives HMR reloads.
+   */
+  const [deployStep, setDeployStepRaw] = useState<DeployStep>(() => 'idle' as DeployStep);
+  const [deployedAddress, setDeployedAddress] = useState<string>(() => '');
+  const [txHash, setTxHash] = useState<string>(() => '');
+  const [errorMsg, setErrorMsg] = useState<string>(() => '');
+  const [verification, setVerification] = useState<SupplyVerification>(createInitialVerification);
+
+  const deployLockRef = useRef(false);
+
+  /**
+   * FIX: Store callbacks in refs instead of reading from options directly
+   * inside useCallback dependencies. This prevents the callbacks from
+   * changing on every render (which caused excessive re-creation of
+   * memoized functions and contributed to HMR fiber corruption).
+   */
+  const signerRef = useRef<JsonRpcSigner | null>(signer);
+  const onDeploySuccessRef = useRef(options.onDeploySuccess);
+  const onResetRef = useRef(options.onReset);
+
+  // Keep refs current on every render
+  signerRef.current = signer;
+  onDeploySuccessRef.current = options.onDeploySuccess;
+  onResetRef.current = options.onReset;
+
+  /**
+   * Guarded state transition.
    */
   const setDeployStep = useCallback((to: DeployStep) => {
     setDeployStepRaw((current) => {
@@ -120,9 +142,6 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
 
   /**
    * Verify deployed token supply matches expected BigInt values.
-   *
-   * Fix #7: Accepts explicit addresses instead of using non-null assertions.
-   * Fix #13: Uses signerRef to avoid stale closure.
    */
   const verifySupply = useCallback(async (
     contractAddress: string,
@@ -169,9 +188,7 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
         );
       }
       if (actualDeployer + actualFee !== actualTotal) {
-        errors.push(
-          `Sum invariant violated: deployer + fee ≠ total`
-        );
+        errors.push(`Sum invariant violated: deployer + fee ≠ total`);
       }
 
       const passed = errors.length === 0;
@@ -202,14 +219,13 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
         error: `Verification query failed: ${err?.shortMessage || err?.message || 'Unknown error'}`,
       });
     }
-  }, []); // Fix #13: no signer in deps — uses signerRef
+  }, []);
 
   /**
    * Deploy a new token contract.
    *
-   * Fix #7: Proper null checks for address.
-   * Fix #8: Uses deployLockRef for immediate double-click prevention.
-   * Fix #15: Uses validateTokenName/validateTokenSymbol for input sanitization.
+   * FIX: Dependency array no longer includes onDeploySuccess (uses ref instead).
+   * This keeps handleDeploy stable across renders.
    */
   const handleDeploy = useCallback(async (tokenName: string, tokenSymbol: string) => {
     const trimmedName = tokenName.trim();
@@ -217,7 +233,6 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
     const currentSigner = signerRef.current;
     const currentAddress = address;
 
-    // Fix #8: Immediate lock before any async work
     if (deployLockRef.current) {
       console.log('[Deploy] Deploy already in progress, ignoring duplicate click');
       return;
@@ -225,7 +240,7 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
 
     if (!currentAddress || !currentSigner || isWrongNetwork) return;
 
-    // ---------- Pre-deploy validation (fix #15: input sanitization) ----------
+    // ---------- Input Validation ----------
     const nameError = validateTokenName(trimmedName);
     if (nameError) {
       setErrorMsg(nameError);
@@ -240,52 +255,117 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
       return;
     }
 
-    // Check compilation status (fix #1)
     if (!IS_COMPILED) {
-      setErrorMsg(
-        'Contract bytecode is not available. Please run `npm run compile` to compile the contract first.'
-      );
+      setErrorMsg('Contract bytecode is not available. Please run `npm run compile` to compile the contract first.');
       setDeployStep('error');
       return;
     }
 
     if (!TOKEN_BYTECODE || TOKEN_BYTECODE === '0x' || TOKEN_BYTECODE.length < 10) {
-      setErrorMsg(
-        'Contract bytecode is missing or invalid. Please recompile the contract with: npm run compile'
-      );
+      setErrorMsg('Contract bytecode is missing or invalid. Please recompile the contract with: npm run compile');
       setDeployStep('error');
       return;
     }
 
-    // Check supply constants (fix #12)
     if (!SUPPLY_CONSTANTS_VALID) {
-      setErrorMsg(
-        'Supply constant validation failed. Check the console for details.'
-      );
+      setErrorMsg('Supply constant validation failed. Check the console for details.');
       setDeployStep('error');
       return;
     }
 
-    // Fix #8: Set lock immediately
+    // Set lock immediately
     deployLockRef.current = true;
-
     setDeployStep('confirming');
     setErrorMsg('');
-    setVerification(INITIAL_VERIFICATION);
+    setVerification(createInitialVerification());
+
+    // ---------- Phase 0: Pre-flight checks ----------
+    let factory: ContractFactory;
+
+    try {
+      factory = new ContractFactory(TOKEN_ABI, TOKEN_BYTECODE, currentSigner);
+    } catch (err: any) {
+      console.error('[Deploy] ContractFactory creation failed:', err);
+      setErrorMsg(
+        'Failed to initialize the contract factory.\n\n' +
+        `Details: ${err?.shortMessage || err?.message || 'Unknown error'}\n\n` +
+        'This may indicate an ABI/bytecode mismatch. Try recompiling with: npm run compile'
+      );
+      setDeployStep('error');
+      deployLockRef.current = false;
+      return;
+    }
+
+    // Check native balance for gas
+    try {
+      const provider = currentSigner.provider;
+      if (provider) {
+        const balance = await provider.getBalance(currentAddress);
+        console.log('[Deploy] Native balance:', formatEther(balance), 'LIT');
+
+        if (balance === 0n) {
+          setErrorMsg(
+            'Your wallet has 0 LIT balance.\n\n' +
+            'Contract deployment requires native LIT tokens to pay for gas. ' +
+            'Please add LIT to your wallet before deploying.'
+          );
+          setDeployStep('error');
+          deployLockRef.current = false;
+          return;
+        }
+
+        // Warn if balance seems very low (< 0.001 LIT)
+        if (balance < 1_000_000_000_000_000n) {
+          console.warn('[Deploy] Very low native balance:', formatEther(balance), 'LIT');
+        }
+      }
+    } catch (balErr) {
+      console.warn('[Deploy] Could not check native balance (non-fatal):', balErr);
+    }
+
+    // ---------- Phase 0.5: Gas estimation pre-check ----------
+    let estimatedGas: bigint | undefined;
+
+    try {
+      console.log('[Deploy] Pre-estimating gas...');
+      const deployTx = await factory.getDeployTransaction(trimmedName, trimmedSymbol);
+
+      const provider = currentSigner.provider;
+      if (provider) {
+        estimatedGas = await provider.estimateGas({
+          ...deployTx,
+          from: currentAddress,
+        });
+        console.log('[Deploy] Estimated gas:', estimatedGas.toString());
+      }
+    } catch (gasErr: any) {
+      console.error('[Deploy] Gas estimation failed:', gasErr);
+      const message = parseDeployError(gasErr, 'send');
+      setErrorMsg(message);
+      setDeployStep('error');
+      deployLockRef.current = false;
+      return;
+    }
 
     // ---------- Phase 1: Send deployment transaction ----------
     let contract: Contract;
     let hash = '';
 
     try {
-      const factory = new ContractFactory(TOKEN_ABI, TOKEN_BYTECODE, currentSigner);
-
       console.log('[Deploy] Creating contract with:', {
         name: trimmedName,
         symbol: trimmedSymbol,
+        estimatedGas: estimatedGas?.toString(),
       });
 
-      contract = (await factory.deploy(trimmedName, trimmedSymbol)) as unknown as Contract;
+      const deployOptions: Record<string, any> = {};
+      if (estimatedGas) {
+        deployOptions.gasLimit = (estimatedGas * 120n) / 100n;
+        console.log('[Deploy] Using gas limit:', deployOptions.gasLimit.toString());
+      }
+
+      const deployed = await factory.deploy(trimmedName, trimmedSymbol, deployOptions);
+      contract = deployed as unknown as Contract;
 
       const deployTx = (contract as any).deploymentTransaction();
       hash = deployTx?.hash || '';
@@ -298,7 +378,7 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
       setErrorMsg(message);
       setDeployStep('error');
       toast.error('Deployment failed');
-      deployLockRef.current = false; // Fix #8: Release lock on error
+      deployLockRef.current = false;
       return;
     }
 
@@ -312,8 +392,6 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
 
       setDeployedAddress(contractAddress);
 
-      // Store deployment in local history
-      // Fix #7: currentAddress is guaranteed non-null by the check above
       storeDeployment({
         name: trimmedName,
         symbol: trimmedSymbol,
@@ -323,23 +401,24 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
         txHash: hash,
       });
 
-      // ---------- Phase 3: Attach event listeners ----------
+      // ---------- Phase 3: Attach event listeners (via ref) ----------
       try {
-        onDeploySuccess?.(contract);
+        onDeploySuccessRef.current?.(contract);
         console.log('[Deploy] Event listeners attached for', contractAddress);
       } catch (listenerErr) {
         console.warn('[Deploy] Failed to attach event listeners:', listenerErr);
       }
 
-      // ---------- Phase 4: Verify supply (fix #19: explicit verifying step) ----------
+      // ---------- Phase 4: Verify supply ----------
       setDeployStep('verifying');
 
-      // Fix #7: Both addresses are verified non-null
-      verifySupply(contractAddress, currentAddress).catch((verifyErr) => {
-        console.warn('[Deploy] Supply verification error (non-fatal):', verifyErr);
-      }).finally(() => {
-        setDeployStep('success');
-      });
+      verifySupply(contractAddress, currentAddress)
+        .catch((verifyErr) => {
+          console.warn('[Deploy] Supply verification error (non-fatal):', verifyErr);
+        })
+        .finally(() => {
+          setDeployStep('success');
+        });
 
       toast.success(`${trimmedSymbol} deployed successfully! 🌮`);
     } catch (err: unknown) {
@@ -352,22 +431,24 @@ export function useTokenDeploy(options: UseTokenDeployOptions) {
       setDeployStep('error');
       toast.error('Deployment failed');
     } finally {
-      deployLockRef.current = false; // Fix #8: Always release lock
+      deployLockRef.current = false;
     }
-  }, [address, isWrongNetwork, setDeployStep, verifySupply, onDeploySuccess]);
+  }, [address, isWrongNetwork, setDeployStep, verifySupply]);
 
   /**
    * Reset the deploy form to initial state.
+   *
+   * FIX: Uses onResetRef instead of onReset in dependency array.
    */
   const resetForm = useCallback(() => {
     setDeployStepRaw('idle');
     setDeployedAddress('');
     setTxHash('');
     setErrorMsg('');
-    setVerification(INITIAL_VERIFICATION);
+    setVerification(createInitialVerification());
     deployLockRef.current = false;
-    onReset?.();
-  }, [onReset]);
+    onResetRef.current?.();
+  }, []);
 
   return {
     deployStep,
